@@ -1,186 +1,143 @@
-#include <nan.h>
+#include <napi.h>
 
-#include <iostream>
 #include <stdio.h>
 #include "usdt.h"
+#include "v8.h"
 
-namespace node {
-  using namespace v8;
+using namespace Napi;
 
-  USDTProvider::USDTProvider() : Nan::ObjectWrap() {
-    provider = NULL;
+USDTProvider::USDTProvider(const CallbackInfo& info) : ObjectWrap<USDTProvider>(info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Must give provider name as argument")
+        .ThrowAsJavaScriptException();
+    return;
   }
 
-  USDTProvider::~USDTProvider() {
-    providerDestroy(provider);
+  std::string name = info[0].As<String>();
+  provider = providerInit(name.c_str());
+  // Unlikely?
+  if (provider == NULL) {
+    Error::Fatal("usdt-provider.cc:20", "providerInit failed");
+    return;
+  }
+}
+
+USDTProvider::~USDTProvider() {
+  providerDestroy(provider);
+}
+
+Napi::Object USDTProvider::Init(Napi::Env env, Napi::Object exports) {
+  Function func = DefineClass(env, "USDTProvider", {
+      InstanceMethod("addProbe", &USDTProvider::AddProbe),
+      InstanceMethod("enable", &USDTProvider::Enable),
+  });
+
+  FunctionReference* constructor = new FunctionReference();
+  *constructor = Persistent(func);
+  env.SetInstanceData(constructor);
+  exports.Set("USDTProvider", func);
+  return exports;
+}
+
+void USDTProvider::Enable(const Napi::CallbackInfo& info) {
+  Napi::HandleScope scope(info.Env());
+
+  if (providerLoad(this->provider) != 0) {
+    Napi::Error::Fatal("USDTProvider::Enable", "Unable to load provider");
+  }
+}
+
+Napi::Value USDTProvider::AddProbe(const Napi::CallbackInfo& info) {
+  Napi::HandleScope scope(info.Env());
+
+  if (info.Length() == 0) {
+    Napi::TypeError::New(info.Env(), "Must give probe name as argument")
+        .ThrowAsJavaScriptException();
+    return info.Env().Undefined();
   }
 
-  Nan::Persistent<FunctionTemplate> USDTProvider::constructor_template;
+  Napi::Value probeA = USDTProbe::New->New({});
+  USDTProbe* probe = USDTProbe::Unwrap(probeA.As<Napi::Object>());
+  probe->argc = 0;
 
-  void USDTProvider::Initialize(v8::Local<Object> target) {
-    Nan::HandleScope scope;
+  for (int i = 0; i < MAX_ARGUMENTS; i++) {
+    if (i < info.Length() - 1) {
+      std::string type = info[i + 1].ToString().Utf8Value();
 
-    Local<FunctionTemplate> t = Nan::New<FunctionTemplate>(USDTProvider::New);
-    t->InstanceTemplate()->SetInternalFieldCount(1);
-    t->SetClassName(Nan::New<String>("USDTProvider").ToLocalChecked());
-    constructor_template.Reset(t);
-
-    Nan::SetPrototypeMethod(t, "addProbe", USDTProvider::AddProbe);
-    // Nan::SetPrototypeMethod(t, "removeProbe", USDTProvider::RemoveProbe);
-    Nan::SetPrototypeMethod(t, "enable", USDTProvider::Enable);
-    Nan::SetPrototypeMethod(t, "disable", USDTProvider::Disable);
-    // Nan::SetPrototypeMethod(t, "fire", USDTProvider::Fire);
-
-    target->Set(Nan::New<String>("USDTProvider").ToLocalChecked(), t->GetFunction());
-
-    USDTProbe::Initialize(target);
-  }
-
-  NAN_METHOD(USDTProvider::New) {
-    Nan::HandleScope scope;
-    USDTProvider *p = new USDTProvider();
-
-    p->Wrap(info.This());
-
-    if (info.Length() < 1 || !info[0]->IsString()) {
-      Nan::ThrowTypeError("Must give provider name as argument");
-      return;
-    }
-
-    String::Utf8Value name(info[0]->ToString());
-
-    if ((p->provider = providerInit(*name)) == NULL) {
-      Nan::ThrowError("providerInit failed");
-      return;
-    }
-
-    info.GetReturnValue().Set(info.This());
-  }
-
-  NAN_METHOD(USDTProvider::AddProbe) {
-    Nan::HandleScope scope;
-
-    v8::Local<Object> obj = info.Holder();
-    USDTProvider *provider = Nan::ObjectWrap::Unwrap<USDTProvider>(obj);
-
-    // create a USDTProbe object
-    v8::Local<Function> klass =
-        Nan::New<FunctionTemplate>(USDTProbe::constructor_template)->GetFunction();
-    v8::Local<Object> pd = klass->NewInstance();
-
-    // store in provider object
-    USDTProbe *probe = Nan::ObjectWrap::Unwrap<USDTProbe>(pd->ToObject());
-    obj->Set(info[0]->ToString(), pd);
-
-    // reference the provider to avoid GC'ing it when only probes remain in scope.
-    Nan::ForceSet(pd, Nan::New<String>("__prov__").ToLocalChecked(), obj,
-        static_cast<PropertyAttribute>(DontEnum | ReadOnly | DontDelete));
-
-    // add probe to provider
-    probe->argc = 0;
-    for (int i = 0; i < MAX_ARGUMENTS; i++) {
-      if (i < info.Length() - 1) {
-        String::Utf8Value type(info[i + 1]->ToString());
-
-        if (strncmp("char *", *type, 6) == 0) {
-          probe->arguments[i] = uint64;
-        }
-        else if (strncmp("int", *type, 3) == 0) {
-          probe->arguments[i] = int32;
-        }
-        else {
-          probe->arguments[i] = uint64;
-        }
-        probe->argc++;
+      if (strncmp("char *", type.c_str(), 6) == 0) {
+        probe->arguments[i] = uint64;
+      } else if (strncmp("int", type.c_str(), 3) == 0) {
+        probe->arguments[i] = int32;
+      } else {
+        probe->arguments[i] = uint64;
       }
+      probe->argc++;
     }
+  }
 
-    String::Utf8Value name(info[0]->ToString());
+  std::string name(info[0].ToString().Utf8Value());
 
-    switch (probe->argc) {
-      case 6:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+  switch (probe->argc) {
+    case 6:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0],
           probe->arguments[1],
           probe->arguments[2],
           probe->arguments[3],
           probe->arguments[4],
           probe->arguments[5]
-        );
-        break;
-      case 5:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+          );
+      break;
+    case 5:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0],
           probe->arguments[1],
           probe->arguments[2],
           probe->arguments[3],
           probe->arguments[4]
-        );
-        break;
-      case 4:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+          );
+      break;
+    case 4:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0],
           probe->arguments[1],
           probe->arguments[2],
           probe->arguments[3]
-        );
-        break;
-      case 3:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+          );
+      break;
+    case 3:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0],
           probe->arguments[1],
           probe->arguments[2]
-        );
-        break;
-      case 2:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+          );
+      break;
+    case 2:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0],
           probe->arguments[1]
-        );
-        break;
-      case 1:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc,
+          );
+      break;
+    case 1:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc,
           probe->arguments[0]
-        );
-        break;
-      case 0:
-      default:
-        probe->probe = providerAddProbe(provider->provider, *name, probe->argc);
-        break;
-    }
-
-    info.GetReturnValue().Set(pd);
+          );
+      break;
+    case 0:
+    default:
+      probe->probe = providerAddProbe(provider, name.c_str(), probe->argc);
+      break;
   }
 
-  NAN_METHOD(USDTProvider::Enable) {
-    Nan::HandleScope scope;
-    USDTProvider *provider = Nan::ObjectWrap::Unwrap<USDTProvider>(info.Holder());
-
-    if (providerLoad(provider->provider) != 0) {
-      // TODO (mmarchini) get error string from libstapsdt
-      Nan::ThrowError("Unable to load provider");
-      return;
-    }
-
-    return;
-  }
-
-  NAN_METHOD(USDTProvider::Disable) {
-    Nan::HandleScope scope;
-    USDTProvider *provider = Nan::ObjectWrap::Unwrap<USDTProvider>(info.Holder());
-
-    if (providerUnload(provider->provider) != 0) {
-      Nan::ThrowError("Unable to unload provider");
-      return;
-    }
-
-    return;
-  }
-
-  extern "C" void
-  init(v8::Local<Object> target) {
-    USDTProvider::Initialize(target);
-  }
-
-  NODE_MODULE(USDTProviderBindings, init)
+  return probeA;
 }
+
+Object Init(Env env, Object target) {
+  USDTProvider::Init(env, target);
+  USDTProbe::Init(env, target);
+  return target;
+}
+
+NODE_API_MODULE(USDTProviderBindings, Init)

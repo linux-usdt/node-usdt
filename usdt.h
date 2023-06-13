@@ -1,5 +1,4 @@
-#include <nan.h>
-#include <node_object_wrap.h>
+#include <napi.h>
 
 extern "C" {
 #include <libstapsdt.h>
@@ -11,49 +10,31 @@ extern "C" {
 #include <unistd.h>
 #include <unistd.h>
 
-namespace node {
+using Napi::CallbackInfo;
 
-using namespace v8;
+class USDTProbe : public Napi::ObjectWrap<USDTProbe> {
+  public:
+    static Napi::Object Init(Napi::Env env, Napi::Object target);
+    static Napi::FunctionReference* New;
 
-class USDTProbe : public Nan::ObjectWrap {
+    Napi::Value Fire(const Napi::CallbackInfo& info);
 
-public:
-  static void Initialize(v8::Local<v8::Object> target);
-  SDTProbe_t *probe;
-  ArgType_t arguments[MAX_ARGUMENTS];
-  size_t argc;
+    USDTProbe(const Napi::CallbackInfo& info);
+    ~USDTProbe();
 
-  static NAN_METHOD(New);
-  static NAN_METHOD(Fire);
-
-  v8::Local<Value> _fire(Nan::NAN_METHOD_ARGS_TYPE, size_t);
-
-  static Nan::Persistent<FunctionTemplate> constructor_template;
-
-  USDTProbe();
-  ~USDTProbe();
-private:
+    SDTProbe_t *probe;
+    ArgType_t arguments[MAX_ARGUMENTS];
+    size_t argc;
 };
 
-class USDTProvider : public Nan::ObjectWrap {
+class USDTProvider : public Napi::ObjectWrap<USDTProvider> {
+  public:
+    static Napi::Object Init(Napi::Env env, Napi::Object object);
 
-public:
-  static void Initialize(v8::Local<v8::Object> target);
-  SDTProvider_t *provider;
+    Napi::Value AddProbe(const Napi::CallbackInfo& info);
+    void Enable(const Napi::CallbackInfo& info);
 
-  static NAN_METHOD(New);
-  static NAN_METHOD(AddProbe);
-  // static NAN_METHOD(RemoveProbe);
-  static NAN_METHOD(Enable);
-  static NAN_METHOD(Disable);
-  // static NAN_METHOD(Fire);
-
-  USDTProvider();
-  ~USDTProvider();
-private:
-  static Nan::Persistent<FunctionTemplate> constructor_template;
-};
-
-void InitUSDTProvider(v8::Local<v8::Object> target);
-
+    USDTProvider(const Napi::CallbackInfo& info);
+    ~USDTProvider();
+    SDTProvider_t *provider;
 };
